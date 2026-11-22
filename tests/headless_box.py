@@ -156,6 +156,36 @@ body_all, _, removed_all = check_body(
 assert removed_all > removed_next * 1.5, "through-all should remove roof as well as floor"
 assert abs(removed_all - 2 * removed_next) < 0.25 * removed_next, "through-all should be about twice through-next"
 
+# Several faces in one feature: floor plus one long side wall of the hollow body.
+doc_multi = App.newDocument("hollow_multi")
+body_m = doc_multi.addObject("PartDesign::Body", "Body")
+outer_m = doc_multi.addObject("PartDesign::AdditiveBox", "Outer")
+body_m.addObject(outer_m)
+outer_m.Length, outer_m.Width, outer_m.Height = 100, 60, 30
+inner_m = doc_multi.addObject("PartDesign::SubtractiveBox", "Inner")
+body_m.addObject(inner_m)
+inner_m.Length, inner_m.Width, inner_m.Height = 96, 56, 26
+inner_m.Placement.Base = App.Vector(2, 2, 2)
+doc_multi.recompute()
+before_m = body_m.Shape.Volume
+floor_m = face_named(inner_m.Shape, lambda f: isinstance(f.Surface, Part.Plane)
+                     and abs(f.Surface.Axis.z) > 0.9 and abs(f.CenterOfMass.z) < 1e-6)
+side_m = face_named(inner_m.Shape, lambda f: isinstance(f.Surface, Part.Plane)
+                    and abs(f.Surface.Axis.y) > 0.9 and abs(f.CenterOfMass.y) < 1e-6)
+multi = voronoi_cutout.create(inner_m, [floor_m, side_m],
+                              {"point_count": 30, "seed": 5, "web_thickness": 3, "edge_margin": 4,
+                               "corner_radius": 1, "depth_mode": "Through next"}, doc_multi)
+removed_multi = report("hollow_multi", multi, before_m)
+assert len(multi.Faces) == 1 and len(multi.Faces[0][1]) == 2, multi.Faces
+assert removed_multi > removed_next * 1.2, "second face should remove extra material"
+assert body_m.Shape.isInside(App.Vector(50, 30, 29), 1e-6, False), "roof was cut through"
+assert body_m.Shape.isInside(App.Vector(50, 59, 15), 1e-6, False), "far side wall was cut through"
+# Floor prisms are ~2.7 mm tall; side-wall prisms are ~2.7 mm deep in Y and taller than that.
+side_prisms = [s for s in multi.AddSubShape.Solids if s.BoundBox.YLength < 4 and s.BoundBox.ZLength > 3]
+assert side_prisms, "no prisms were cut into the side wall"
+assert all(s.BoundBox.YMax < 2.5 for s in side_prisms), "side prisms reached past the near wall"
+save(doc_multi, "hollow_multi")
+
 # Editing a property and recomputing regenerates the pattern.
 feature.Seed = 99
 feature.Document.recompute()

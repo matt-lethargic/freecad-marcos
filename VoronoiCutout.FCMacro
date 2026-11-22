@@ -63,27 +63,37 @@ def save_params(params):
             grp.SetFloat(key, float(value))
 
 
-def selected_face():
-    """Returns (object, face_name) for the single selected planar face."""
+def selected_faces():
+    """Returns (object, [face names]) for the selected planar faces, all on one object."""
     selection = Gui.Selection.getSelectionEx()
-    faces = [
-        (sel.Object, name)
-        for sel in selection
-        for name in sel.SubElementNames
-        if name.split(".")[-1].startswith("Face")
-    ]
-    if len(faces) != 1:
-        raise ValueError("Select exactly one face on a solid, then run the macro.")
-    obj, name = faces[0]
-    if obj.TypeId == "PartDesign::Body":
-        obj = obj.Tip
-        name = name.split(".")[-1]
+    objects = []
+    names = []
+    for sel in selection:
+        obj = sel.Object
+        if obj.TypeId == "PartDesign::Body":
+            obj = obj.Tip
+        for name in sel.SubElementNames:
+            name = name.split(".")[-1]
+            if name.startswith("Face"):
+                if obj not in objects:
+                    objects.append(obj)
+                if name not in names:
+                    names.append(name)
+    if not names:
+        raise ValueError("Select one or more faces on a solid, then run the macro.")
+    if len(objects) != 1:
+        raise ValueError("All selected faces must belong to the same object.")
+    obj = objects[0]
     if obj is None or not hasattr(obj, "Shape") or obj.Shape.isNull():
         raise ValueError("The selected object has no shape.")
     if not obj.Shape.Solids:
         raise ValueError("The selected object is not a solid.")
-    voronoi_cutout.planar_surface(obj.Shape.getElement(name))
-    return obj, name
+    for name in names:
+        try:
+            voronoi_cutout.planar_surface(obj.Shape.getElement(name))
+        except ValueError as err:
+            raise ValueError("%s: %s" % (name, err))
+    return obj, names
 
 
 def report_error(message):
@@ -94,7 +104,7 @@ def report_error(message):
 
 def main():
     try:
-        obj, face_name = selected_face()
+        obj, face_names = selected_faces()
     except ValueError as err:
         report_error(str(err))
         return
@@ -107,7 +117,7 @@ def main():
     doc = obj.Document
     doc.openTransaction("Voronoi cutout")
     try:
-        feature = voronoi_cutout.create(obj, face_name, params, doc)
+        feature = voronoi_cutout.create(obj, face_names, params, doc)
     except Exception as err:  # surface anything OCC throws
         doc.abortTransaction()
         report_error(str(err))
@@ -121,7 +131,8 @@ def main():
     tool = getattr(feature, "AddSubShape", None) or getattr(feature, "Cutter", None)
     cells = len(tool.Solids) if tool is not None else 0
     App.Console.PrintMessage(
-        "Voronoi Cutout: cut %d cells into %s\n" % (cells, obj.Label)
+        "Voronoi Cutout: cut %d cells into %s through %d face(s)\n"
+        % (cells, obj.Label, len(face_names))
     )
 
 

@@ -10,8 +10,9 @@ feature's Python proxy can be found again when a document is reopened.
 
 Two ways to use it:
 
-    create(obj, "Face6", params)   # adds a parametric feature to the document
-    build_tool(face, solid, params)  # just the cutter shape, no document
+    create(obj, "Face6", params)              # adds a parametric feature to the document
+    create(obj, ["Face5", "Face6"], params)   # same feature, several faces
+    build_tool(face, solid, params)           # just the cutter shape, no document
 
 If `obj` sits inside a PartDesign Body the feature is a
 PartDesign::FeatureSubtractivePython inserted after the tip, so the result
@@ -379,12 +380,35 @@ class VoronoiCutout:
 
     def __init__(self, obj, params=None):
         obj.Proxy = self
-        obj.addProperty("App::PropertyLinkSub", "Face", "Voronoi",
-                        "Planar face the pattern is cut through")
+        obj.addProperty("App::PropertyLinkSubList", "Faces", "Voronoi",
+                        "Planar faces the pattern is cut through. Each face gets its "
+                        "own pattern (Seed + face index)")
         for key, name, ptype, doc in PROPERTIES:
             obj.addProperty(ptype, name, "Voronoi", doc)
         obj.DepthMode = DEPTH_MODES
         self.set_params(obj, params)
+
+    def onDocumentRestored(self, obj):
+        # Features saved by v0.2 had a single "Face" link; carry it over.
+        if not hasattr(obj, "Faces"):
+            obj.addProperty("App::PropertyLinkSubList", "Faces", "Voronoi",
+                            "Planar faces the pattern is cut through")
+            old = getattr(obj, "Face", None)
+            if old and old[0] is not None:
+                obj.Faces = [old]
+
+    @staticmethod
+    def faces(obj):
+        """(link, name) pairs from the Faces property, or the legacy Face."""
+        pairs = []
+        for link, subs in getattr(obj, "Faces", []) or []:
+            for sub in subs:
+                pairs.append((link, sub))
+        if not pairs and hasattr(obj, "Face"):
+            link, subs = obj.Face
+            if link is not None:
+                pairs.extend((link, sub) for sub in subs)
+        return pairs
 
     @staticmethod
     def set_params(obj, params):
@@ -406,24 +430,34 @@ class VoronoiCutout:
 
     def execute(self, obj):
         solid = self.base_shape(obj)
-        link, subs = obj.Face
-        if link is None or not subs:
-            raise ValueError("Voronoi cutout has no face set.")
-        face = link.Shape.getElement(subs[0])
-        if not isinstance(face, Part.Face):
-            raise ValueError("%s is not a face." % subs[0])
+        pairs = self.faces(obj)
+        if not pairs:
+            raise ValueError("Voronoi cutout has no faces set.")
 
         params = self.get_params(obj)
         # PropertyLength values come back as Quantity; the geometry wants floats.
         for key in ("min_spacing", "web_thickness", "edge_margin", "corner_radius", "depth"):
             params[key] = float(params[key])
 
-        tool = build_tool(face, solid, params)
+        tools = []
+        result = solid
+        for index, (link, sub) in enumerate(pairs):
+            face = link.Shape.getElement(sub)
+            if not isinstance(face, Part.Face):
+                raise ValueError("%s is not a face." % sub)
+            face_params = dict(params, seed=int(params["seed"]) + index)
+            tool = build_tool(face, solid, face_params)
+            tools.append(tool)
+            # Cut face by face: prisms from different faces may overlap at
+            # corners, and a compound with overlaps is a poor boolean argument.
+            result = result.cut(tool)
+
+        cutter = Part.makeCompound([s for t in tools for s in t.Solids])
         if hasattr(obj, "AddSubShape"):
-            obj.AddSubShape = tool  # PartDesign: lets patterns and mirrors reuse the cutter
+            obj.AddSubShape = cutter  # PartDesign: lets patterns and mirrors reuse the cutter
         else:
-            obj.Cutter = tool
-        obj.Shape = solid.cut(tool)
+            obj.Cutter = cutter
+        obj.Shape = result
 
     def dumps(self):
         return None
@@ -572,20 +606,25 @@ def find_body(obj):
     return None
 
 
-def create(obj, face_name, params=None, doc=None):
+def create(obj, face_names, params=None, doc=None):
     """
-    Add a Voronoi cutout feature cutting `obj` through its face `face_name`.
+    Add a Voronoi cutout feature cutting `obj` through `face_names`, a face
+    name ("Face6") or a list of them.
 
     Inside a PartDesign Body the feature becomes the new tip. Anywhere else a
     Part::FeaturePython is created with `obj` as its Base. Returns the feature.
     """
     doc = doc or obj.Document
     body = find_body(obj)
+    if isinstance(face_names, str):
+        face_names = [face_names]
+    face_names = [name.split(".")[-1] for name in face_names]
+    if not face_names:
+        raise ValueError("No faces given.")
 
     if body is not None:
         if obj is body:
             obj = body.Tip
-            face_name = face_name.split(".")[-1]
         feature = doc.addObject("PartDesign::FeatureSubtractivePython", "VoronoiCutout")
         VoronoiCutout(feature, params)
         body.addObject(feature)  # inserts after the tip and sets BaseFeature
@@ -600,7 +639,7 @@ def create(obj, face_name, params=None, doc=None):
         previous = obj
 
     feature.Label = "Voronoi cutout"
-    feature.Face = (obj, [face_name])
+    feature.Faces = [(obj, face_names)]
     doc.recompute()
 
     if App.GuiUp:

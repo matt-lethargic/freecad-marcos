@@ -25,9 +25,13 @@ document containing a Voronoi cutout is reopened.
 ## Voronoi Cutout
 
 1. Open or build a solid (PartDesign body, Part box, anything with a `Shape`).
-2. Click one planar face in the 3D view.
+2. Click one planar face in the 3D view, or Ctrl-click several faces of the same object.
 3. Run `Macro > Macros... > VoronoiCutout`.
 4. Fill in the dialog and press OK.
+
+With several faces selected you get one feature that cuts all of them with the same settings.
+Each face gets its own pattern (the seed is offset by the face's position in the list), and the
+faces are cut one after another so patterns meeting at a corner don't fight each other.
 
 **Inside a PartDesign Body** the cut is added as a subtractive feature after the current tip, so it
 sits in the body's tree like a Pocket would. Later features build on it, and patterns and mirrors
@@ -60,14 +64,17 @@ gets a different depth per cell.
 ### Limits
 
 - The face must be planar. Curved faces are rejected with a message.
-- The face is remembered by name (`Face12`). If an earlier feature changes the face numbering, the
-  cutout may need its `Face` property pointing at the right face again.
+- Faces are remembered by name (`Face12`). If an earlier feature changes the face numbering, the
+  cutout may need its `Faces` property pointing at the right faces again.
+- All faces of one cutout must belong to the same object. Select faces on two objects and the
+  macro asks you to pick again.
 - Each cell is one boolean prism, so several hundred cells can take a while to recompute.
 
 ## Headless test
 
-With FreeCAD installed, this exercises a Part plate, a blind pocket, a plate with a hole, and a
-hollow PartDesign body in both through modes, then reopens a saved result and recomputes it:
+With FreeCAD installed, this exercises a Part plate, a blind pocket, a plate with a hole, a
+hollow PartDesign body in both through modes and with two faces at once, then reopens a saved
+result and recomputes it:
 
 ```bash
 /Applications/FreeCAD.app/Contents/Resources/bin/freecadcmd -c "exec(open('tests/headless_box.py').read())"
