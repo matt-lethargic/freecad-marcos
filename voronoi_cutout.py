@@ -5,8 +5,10 @@ voronoi_cutout
 
 Geometry and the parametric feature behind VoronoiCutout.FCMacro.
 
-This file must live next to the macro in FreeCAD's user Macro folder so the
-feature's Python proxy can be found again when a document is reopened.
+This file is installed as an addon (the repo linked into FreeCAD's user Mod
+folder) so the feature's Python proxy can be found again when a document is
+reopened. FreeCAD 1.1 refuses to import feature modules from the Macro folder
+during restore.
 
 Two ways to use it:
 

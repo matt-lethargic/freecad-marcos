@@ -10,8 +10,10 @@ Inside a PartDesign Body the cut is added as a feature after the tip, so it
 stays in the body's tree and can be edited later through its properties.
 Elsewhere it is a Part feature with the original object nested under it.
 
-The geometry and the feature live in voronoi_cutout.py, which must sit next
-to this macro in FreeCAD's user Macro folder.
+The geometry and the feature live in voronoi_cutout.py, installed as an addon
+by linking the repo into FreeCAD's user Mod folder (see the README). It has to
+be there rather than in the Macro folder: FreeCAD 1.1 only re-imports feature
+modules from its own tree or from Mod when a document is reopened.
 """
 
 __Name__ = "Voronoi Cutout"
@@ -24,16 +26,19 @@ __Web__ = "https://github.com/matt-lethargic/freecad-marcos"
 __Files__ = "voronoi_cutout.py"
 
 import importlib
-import sys
 
 import FreeCAD as App
 import FreeCADGui as Gui
 
-macro_dir = App.getUserMacroDir(True)
-if macro_dir not in sys.path:
-    sys.path.insert(0, macro_dir)
-
-import voronoi_cutout
+try:
+    import voronoi_cutout
+except ImportError:
+    from PySide import QtWidgets
+    QtWidgets.QMessageBox.warning(
+        None, "Voronoi Cutout",
+        "voronoi_cutout.py was not found. Link the repo into FreeCAD's user Mod folder "
+        "(see the README), restart FreeCAD, then run the macro again.")
+    raise
 importlib.reload(voronoi_cutout)  # pick up edits without restarting FreeCAD
 
 PARAM_PATH = "User parameter:BaseApp/Preferences/Macros/VoronoiCutout"

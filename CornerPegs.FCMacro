@@ -1,0 +1,131 @@
+# -*- coding: utf-8 -*-
+"""
+Corner Pegs
+===========
+
+Select the open end face(s) of a rectangular tube, run this macro, set the
+sizes, and each inside corner gets a quarter-round boss with a peg hole
+facing out of the end. Two tubes join end to end with four pegs; the dialog
+can also drop a matching peg part into the document for printing.
+
+Inside a PartDesign Body the result is a feature after the tip. The geometry
+and the feature live in corner_pegs.py, installed under FreeCAD's user Mod
+folder (see the README).
+"""
+
+__Name__ = "Corner Pegs"
+__Comment__ = "Add corner bosses with peg holes to the open ends of a rectangular tube"
+__Author__ = "matt-lethargic"
+__Version__ = "0.1.0"
+__Date__ = "2026-11-22"
+__License__ = "MIT"
+__Web__ = "https://github.com/matt-lethargic/freecad-marcos"
+__Files__ = "corner_pegs.py"
+
+import importlib
+
+import FreeCAD as App
+import FreeCADGui as Gui
+
+try:
+    import corner_pegs
+except ImportError:
+    from PySide import QtWidgets
+    QtWidgets.QMessageBox.warning(
+        None, "Corner Pegs",
+        "corner_pegs.py was not found. Link the repo into FreeCAD's user Mod folder "
+        "(see the README), restart FreeCAD, then run the macro again.")
+    raise
+importlib.reload(corner_pegs)  # pick up edits without restarting FreeCAD
+
+PARAM_PATH = "User parameter:BaseApp/Preferences/Macros/CornerPegs"
+
+
+def load_params():
+    grp = App.ParamGet(PARAM_PATH)
+    params = {key: grp.GetFloat(key, default) for key, default in corner_pegs.DEFAULTS.items()}
+    params["make_peg"] = grp.GetBool("make_peg", True)
+    return params
+
+
+def save_params(params, make_peg_too):
+    grp = App.ParamGet(PARAM_PATH)
+    for key, value in params.items():
+        grp.SetFloat(key, float(value))
+    grp.SetBool("make_peg", make_peg_too)
+
+
+def selected_faces():
+    """Returns (object, [face names]) for the selected end faces, all on one object."""
+    objects = []
+    names = []
+    for sel in Gui.Selection.getSelectionEx():
+        obj = sel.Object
+        if obj.TypeId == "PartDesign::Body":
+            obj = obj.Tip
+        for name in sel.SubElementNames:
+            name = name.split(".")[-1]
+            if name.startswith("Face"):
+                if obj not in objects:
+                    objects.append(obj)
+                if name not in names:
+                    names.append(name)
+    if not names:
+        raise ValueError("Select the open end face(s) of the tube, then run the macro.")
+    if len(objects) != 1:
+        raise ValueError("All selected faces must belong to the same object.")
+    obj = objects[0]
+    if obj is None or not hasattr(obj, "Shape") or obj.Shape.isNull() or not obj.Shape.Solids:
+        raise ValueError("The selected object is not a solid.")
+    for name in names:
+        face = obj.Shape.getElement(name)
+        try:
+            corner_pegs.planar_surface(face)
+            corner_pegs.inner_wire(face)
+        except ValueError as err:
+            raise ValueError("%s: %s" % (name, err))
+    return obj, names
+
+
+def report_error(message):
+    App.Console.PrintError("Corner Pegs: %s\n" % message)
+    from PySide import QtWidgets
+    QtWidgets.QMessageBox.warning(None, "Corner Pegs", message)
+
+
+def main():
+    try:
+        obj, face_names = selected_faces()
+    except ValueError as err:
+        report_error(str(err))
+        return
+
+    answer = corner_pegs.ask_params(load_params())
+    if answer is None:
+        return
+    params, make_peg_too = answer
+    save_params(params, make_peg_too)
+
+    doc = obj.Document
+    doc.openTransaction("Corner pegs")
+    try:
+        feature = corner_pegs.create(obj, face_names, params, doc)
+        if make_peg_too:
+            corner_pegs.make_peg(doc, params)
+    except Exception as err:  # surface anything OCC throws
+        doc.abortTransaction()
+        report_error(str(err))
+        return
+    doc.commitTransaction()
+
+    if feature.Shape.isNull() or not feature.isValid():
+        report_error("The feature failed to recompute. Check the report view for details.")
+        return
+
+    App.Console.PrintMessage(
+        "Corner Pegs: added %d bosses with peg holes to %s\n"
+        % (4 * len(face_names), obj.Label)
+    )
+
+
+main()
