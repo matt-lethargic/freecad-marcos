@@ -1,0 +1,275 @@
+import FreeCAD as App
+import Part
+import FreeCADGui as Gui
+import random
+
+# ==================================
+# CONFIGURATION
+# ==================================
+
+WIDTH = 100.0
+HEIGHT = 100.0
+POINT_COUNT = 25
+RANDOM_SEED = 42
+WEB_THICKNESS = 3.0
+EDGE_MARGIN = 5.0
+
+
+EPSILON = 1e-9
+
+# ==================================
+# DOCUMENT SETUP
+# ==================================
+
+doc = App.ActiveDocument
+
+if doc is None:
+    doc = App.newDocument("VoronoiTest")
+
+# Remove previous generated objects
+for obj in list(doc.Objects):
+    if obj.Name.startswith("Voronoi"):
+        doc.removeObject(obj.Name)
+
+# ==================================
+# GENERATE SEED POINTS
+# ==================================
+
+random.seed(RANDOM_SEED)
+
+points = []
+
+for i in range(POINT_COUNT):
+    x = random.uniform(5, WIDTH - 5)
+    y = random.uniform(5, HEIGHT - 5)
+    points.append((x, y))
+
+
+# ==================================
+# HALF-PLANE CLIPPING
+# ==================================
+
+def clip_polygon(polygon, a, b, c):
+    """
+    Clip a polygon against the half-plane:
+
+        a*x + b*y <= c
+
+    Uses Sutherland-Hodgman polygon clipping.
+    """
+
+    if not polygon:
+        return []
+
+    result = []
+
+    def inside(point):
+        return a * point[0] + b * point[1] <= c + EPSILON
+
+    def intersection(p1, p2):
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+
+        denominator = a * dx + b * dy
+
+        if abs(denominator) < EPSILON:
+            return p1
+
+        t = (c - a * p1[0] - b * p1[1]) / denominator
+
+        return (
+            p1[0] + t * dx,
+            p1[1] + t * dy
+        )
+
+    previous = polygon[-1]
+    previous_inside = inside(previous)
+
+    for current in polygon:
+        current_inside = inside(current)
+
+        if current_inside:
+            if not previous_inside:
+                result.append(intersection(previous, current))
+
+            result.append(current)
+
+        elif previous_inside:
+            result.append(intersection(previous, current))
+
+        previous = current
+        previous_inside = current_inside
+
+    return result
+
+
+# ==================================
+# VORONOI CELL GENERATION
+# ==================================
+
+def generate_voronoi_cell(seed, all_points):
+    """
+    Generate one Voronoi cell.
+
+    Starts with the rectangular boundary and
+    clips it against every other seed point.
+    """
+
+    sx, sy = seed
+
+    margin = EDGE_MARGIN
+
+    polygon = [
+        (margin, margin),
+        (WIDTH - margin, margin),
+        (WIDTH - margin, HEIGHT - margin),
+        (margin, HEIGHT - margin)
+    ]
+
+    for other in all_points:
+
+        if other == seed:
+            continue
+
+        ox, oy = other
+
+        # Perpendicular bisector equation:
+        #
+        # 2(ox-sx)*x + 2(oy-sy)*y
+        # <= ox² + oy² - sx² - sy²
+
+        a = 2.0 * (ox - sx)
+        b = 2.0 * (oy - sy)
+
+        c = (
+            ox * ox + oy * oy
+            - sx * sx - sy * sy
+        )
+
+        # Move the bisector towards this cell's seed.
+        # Each cell retreats by half the desired web thickness.
+
+        import math
+
+        normal_length = math.sqrt(a * a + b * b)
+
+        c -= (WEB_THICKNESS / 2.0) * normal_length
+
+        polygon = clip_polygon(
+            polygon,
+            a,
+            b,
+            c
+        )
+
+        if len(polygon) < 3:
+            return []
+
+    return polygon
+
+
+# ==================================
+# GENERATE ALL CELLS
+# ==================================
+
+cells = []
+
+for point in points:
+
+    cell = generate_voronoi_cell(
+        point,
+        points
+    )
+
+    if len(cell) >= 3:
+        cells.append(cell)
+
+
+# ==================================
+# CREATE FREECAD GEOMETRY
+# ==================================
+
+# Boundary
+boundary = Part.makeBox(
+    WIDTH,
+    HEIGHT,
+    1.0
+)
+
+boundary_obj = doc.addObject(
+    "Part::Feature",
+    "VoronoiBoundary"
+)
+
+boundary_obj.Shape = boundary
+
+boundary_obj.ViewObject.ShapeColor = (0.75, 0.75, 0.75)
+
+
+# Cell polygons
+for i, polygon in enumerate(cells):
+
+    vertices = [
+        App.Vector(x, y, 2.0)
+        for x, y in polygon
+    ]
+
+    vertices.append(vertices[0])
+
+    wire = Part.makePolygon(vertices)
+
+    face = Part.Face(wire)
+
+    cell_obj = doc.addObject(
+        "Part::Feature",
+        f"VoronoiCell{i + 1}"
+    )
+
+    cell_obj.Shape = face
+
+    cell_obj.ViewObject.LineColor = (
+        random.random(),
+        random.random(),
+        random.random()
+    )
+
+    cell_obj.ViewObject.LineWidth = 2.0
+
+    cell_obj.ViewObject.DisplayMode = "Flat Lines"
+    cell_obj.ViewObject.ShapeColor = (
+        random.random(),
+        random.random(),
+        random.random()
+    )
+
+
+# Seed points
+for i, point in enumerate(points):
+
+    vertex = Part.Vertex(
+        App.Vector(point[0], point[1], 2.0)
+    )
+
+    point_obj = doc.addObject(
+        "Part::Feature",
+        f"VoronoiPoint{i + 1}"
+    )
+
+    point_obj.Shape = vertex
+    point_obj.ViewObject.PointSize = 8
+    point_obj.ViewObject.PointColor = (0, 0, 0)
+
+
+# ==================================
+# FINISH
+# ==================================
+
+doc.recompute()
+
+Gui.activeDocument().activeView().viewTop()
+Gui.activeDocument().activeView().fitAll()
+
+App.Console.PrintMessage(
+    f"Generated {len(cells)} Voronoi cells "
+    f"from {len(points)} seed points\n"
+)

@@ -1,0 +1,506 @@
+# -*- coding: utf-8 -*-
+"""
+Voronoi Cutout
+==============
+
+Select ONE planar face on a solid, run this macro, fill in the parameters,
+and a Voronoi cell pattern is cut into the solid through that face.
+
+How it works
+------------
+1. Seed points are scattered over the face (optionally with a minimum
+   spacing and a few Lloyd relaxation passes so the cells look even).
+2. Each Voronoi cell is built by clipping the face's bounding rectangle
+   against the perpendicular bisector to every other seed. Each bisector
+   is pulled back by half the web thickness, so neighbouring cells are
+   separated by a strip of material.
+3. Cells are clipped to the face outline inset by the edge margin, then
+   the corners are rounded with an inset/outset 2D offset.
+4. Every cell is extruded into the solid and the lot is subtracted with a
+   parametric Part::Cut, so the original body stays in the tree.
+
+Can also be driven without the GUI through run() - see tests/headless_box.py.
+"""
+
+__Name__ = "Voronoi Cutout"
+__Comment__ = "Cut a Voronoi cell pattern into a solid through a selected planar face"
+__Author__ = "matt-lethargic"
+__Version__ = "0.1.0"
+__Date__ = "2026-11-22"
+__License__ = "MIT"
+__Web__ = "https://github.com/matt-lethargic/freecad-marcos"
+__Files__ = ""
+
+import math
+import random
+
+import FreeCAD as App
+import Part
+
+EPSILON = 1e-9
+PARAM_PATH = "User parameter:BaseApp/Preferences/Macros/VoronoiCutout"
+
+DEFAULTS = {
+    "point_count": 40,        # number of cells to aim for
+    "seed": 42,               # random seed, same seed = same pattern
+    "min_spacing": 0.0,       # minimum distance between seed points (0 = off)
+    "relax_iterations": 2,    # Lloyd relaxation passes, evens the cells out
+    "web_thickness": 3.0,     # material left between cells (mm)
+    "edge_margin": 5.0,       # solid border kept around the face outline (mm)
+    "corner_radius": 1.0,     # fillet radius on cell corners (mm, 0 = sharp)
+    "depth": 0.0,             # cut depth (mm, 0 = all the way through)
+}
+
+PARAM_TYPES = {
+    "point_count": int,
+    "seed": int,
+    "min_spacing": float,
+    "relax_iterations": int,
+    "web_thickness": float,
+    "edge_margin": float,
+    "corner_radius": float,
+    "depth": float,
+}
+
+
+# ==================================
+# 2D GEOMETRY
+# ==================================
+
+def clip_polygon(polygon, a, b, c):
+    """Sutherland-Hodgman clip of polygon against half-plane a*x + b*y <= c."""
+    if not polygon:
+        return []
+
+    def inside(p):
+        return a * p[0] + b * p[1] <= c + EPSILON
+
+    def intersection(p1, p2):
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        denominator = a * dx + b * dy
+        if abs(denominator) < EPSILON:
+            return p1
+        t = (c - a * p1[0] - b * p1[1]) / denominator
+        return (p1[0] + t * dx, p1[1] + t * dy)
+
+    result = []
+    previous = polygon[-1]
+    previous_inside = inside(previous)
+
+    for current in polygon:
+        current_inside = inside(current)
+        if current_inside:
+            if not previous_inside:
+                result.append(intersection(previous, current))
+            result.append(current)
+        elif previous_inside:
+            result.append(intersection(previous, current))
+        previous = current
+        previous_inside = current_inside
+
+    return result
+
+
+def voronoi_cell(index, points, rect, retreat):
+    """
+    Voronoi cell of points[index], clipped to rect = (umin, umax, vmin, vmax).
+
+    Every bisector is moved `retreat` towards the seed, which leaves a web of
+    2 * retreat between neighbouring cells.
+    """
+    sx, sy = points[index]
+    umin, umax, vmin, vmax = rect
+    polygon = [(umin, vmin), (umax, vmin), (umax, vmax), (umin, vmax)]
+
+    for j, (ox, oy) in enumerate(points):
+        if j == index:
+            continue
+
+        # Perpendicular bisector: 2(ox-sx)x + 2(oy-sy)y <= ox²+oy²-sx²-sy²
+        a = 2.0 * (ox - sx)
+        b = 2.0 * (oy - sy)
+        c = ox * ox + oy * oy - sx * sx - sy * sy
+
+        normal_length = math.sqrt(a * a + b * b)
+        if normal_length < EPSILON:
+            continue  # coincident seed, ignore it
+        c -= retreat * normal_length
+
+        polygon = clip_polygon(polygon, a, b, c)
+        if len(polygon) < 3:
+            return []
+
+    return polygon
+
+
+def polygon_centroid(polygon):
+    n = len(polygon)
+    area = 0.0
+    cx = 0.0
+    cy = 0.0
+    for i in range(n):
+        x0, y0 = polygon[i]
+        x1, y1 = polygon[(i + 1) % n]
+        cross = x0 * y1 - x1 * y0
+        area += cross
+        cx += (x0 + x1) * cross
+        cy += (y0 + y1) * cross
+    if abs(area) < EPSILON:
+        return (sum(p[0] for p in polygon) / n, sum(p[1] for p in polygon) / n)
+    area *= 0.5
+    return (cx / (6.0 * area), cy / (6.0 * area))
+
+
+def generate_points(rect, count, seed, min_spacing, accept):
+    """
+    Scatter `count` points inside rect, keeping only those `accept(u, v)` says
+    are inside the face, and at least `min_spacing` apart (dart throwing).
+    """
+    umin, umax, vmin, vmax = rect
+    rng = random.Random(seed)
+    points = []
+    attempts = 0
+    max_attempts = max(count * 200, 1000)
+    spacing_sq = min_spacing * min_spacing
+
+    while len(points) < count and attempts < max_attempts:
+        attempts += 1
+        u = rng.uniform(umin, umax)
+        v = rng.uniform(vmin, vmax)
+        if not accept(u, v):
+            continue
+        if spacing_sq > 0 and any(
+            (u - p[0]) ** 2 + (v - p[1]) ** 2 < spacing_sq for p in points
+        ):
+            continue
+        points.append((u, v))
+
+    return points
+
+
+def relax_points(points, rect, iterations):
+    """Lloyd relaxation: move each seed to the centroid of its cell."""
+    for _ in range(iterations):
+        moved = []
+        for i, p in enumerate(points):
+            cell = voronoi_cell(i, points, rect, 0.0)
+            moved.append(polygon_centroid(cell) if len(cell) >= 3 else p)
+        points = moved
+    return points
+
+
+# ==================================
+# 3D GEOMETRY
+# ==================================
+
+def planar_surface(face):
+    surface = face.Surface
+    if not isinstance(surface, Part.Plane):
+        raise ValueError(
+            "The selected face is not planar (%s)." % type(surface).__name__
+        )
+    return surface
+
+
+def cut_direction(face, solid):
+    """Unit vector pointing from the face into the solid."""
+    surface = planar_surface(face)
+    centre = face.CenterOfMass
+    u, v = surface.parameter(centre)
+    normal = face.normalAt(u, v)
+    normal.normalize()
+    probe = 0.05
+    if solid.isInside(centre - normal * probe, 1e-6, False):
+        return normal * -1.0
+    if solid.isInside(centre + normal * probe, 1e-6, False):
+        return normal
+    # Centre of mass can sit off the face (L-shapes). Faces of a solid carry
+    # an outward normal, so inward is the safe default.
+    return normal * -1.0
+
+
+def face_from_polygon(polygon, surface):
+    points = []
+    for u, v in polygon:
+        p = surface.value(u, v)
+        if not points or (p - points[-1]).Length > 1e-6:
+            points.append(p)
+    if len(points) > 1 and (points[0] - points[-1]).Length <= 1e-6:
+        points.pop()
+    if len(points) < 3:
+        return None
+    wire = Part.makePolygon(points + [points[0]])
+    return Part.Face(wire)
+
+
+def offset_faces(face, distance):
+    """2D offset of a face; returns the resulting faces (may be none)."""
+    if abs(distance) < EPSILON:
+        return [face]
+    try:
+        result = face.makeOffset2D(distance, 0, False, False, False)
+    except Exception:  # OCC raises several types; a failed offset just means "nothing left"
+        return []
+    if result.isNull():
+        return []
+    return [f for f in result.Faces if f.Area > EPSILON]
+
+
+def round_corners(face, radius):
+    """Inset then outset with arc joins: every corner becomes a fillet."""
+    if radius <= 0:
+        return [face]
+    rounded = []
+    for inner in offset_faces(face, -radius):
+        rounded.extend(offset_faces(inner, radius))
+    return rounded
+
+
+def build_cells(face, solid, params):
+    """
+    Returns (cell_faces, seed_points_3d).
+
+    cell_faces are planar faces lying on `face`, already clipped to the
+    inset outline and corner rounded.
+    """
+    surface = planar_surface(face)
+    rect = face.ParameterRange
+    margin = float(params["edge_margin"])
+
+    outline = offset_faces(face, -margin)
+    if not outline:
+        raise ValueError("Edge margin is too large: nothing of the face is left.")
+    outline = Part.makeCompound(outline)
+
+    def accept(u, v):
+        return outline.isInside(surface.value(u, v), 1e-6, True)
+
+    points = generate_points(
+        rect,
+        int(params["point_count"]),
+        int(params["seed"]),
+        float(params["min_spacing"]),
+        accept,
+    )
+    if len(points) < 1:
+        raise ValueError("No seed points fitted on the face. Lower min spacing or edge margin.")
+
+    points = relax_points(points, rect, int(params["relax_iterations"]))
+
+    retreat = float(params["web_thickness"]) / 2.0
+    radius = float(params["corner_radius"])
+    cell_faces = []
+
+    for i in range(len(points)):
+        polygon = voronoi_cell(i, points, rect, retreat)
+        if len(polygon) < 3:
+            continue
+        cell = face_from_polygon(polygon, surface)
+        if cell is None:
+            continue
+        clipped = cell.common(outline)
+        for piece in clipped.Faces:
+            if piece.Area <= EPSILON:
+                continue
+            cell_faces.extend(round_corners(piece, radius))
+
+    seeds_3d = [surface.value(u, v) for u, v in points]
+    return cell_faces, seeds_3d
+
+
+def build_tool(face, solid, params):
+    """Compound of prisms, one per cell, ready to subtract from `solid`."""
+    cell_faces, seeds = build_cells(face, solid, params)
+    if not cell_faces:
+        raise ValueError("No cells survived. Try more points, a thinner web, or a smaller margin/radius.")
+
+    direction = cut_direction(face, solid)
+    depth = float(params["depth"])
+    if depth <= 0:
+        depth = solid.BoundBox.DiagonalLength + 1.0
+    lift = 0.5  # start slightly above the face so the boolean has no coplanar faces
+
+    prisms = []
+    for cell in cell_faces:
+        start = cell.translated(direction * -lift)
+        prisms.append(start.extrude(direction * (depth + lift)))
+
+    return Part.makeCompound(prisms), seeds
+
+
+# ==================================
+# DOCUMENT
+# ==================================
+
+def run(obj, face_name, params, doc=None):
+    """
+    Cut the pattern into `obj` through its sub-element `face_name` ("Face6").
+
+    Adds a hidden VoronoiTool feature and a Part::Cut called VoronoiCutout
+    that uses the original object as its base. Returns the cut feature.
+    """
+    doc = doc or obj.Document
+    full = dict(DEFAULTS)
+    full.update(params or {})
+
+    solid = obj.Shape
+    face = solid.getElement(face_name)
+    if not isinstance(face, Part.Face):
+        raise ValueError("%s is not a face." % face_name)
+
+    tool_shape, _seeds = build_tool(face, solid, full)
+
+    tool = doc.addObject("Part::Feature", "VoronoiTool")
+    tool.Label = "Voronoi tool (%s)" % obj.Label
+    tool.Shape = tool_shape
+
+    cut = doc.addObject("Part::Cut", "VoronoiCutout")
+    cut.Label = "%s Voronoi" % obj.Label
+    cut.Base = obj
+    cut.Tool = tool
+    doc.recompute()
+
+    if App.GuiUp:
+        obj.ViewObject.Visibility = False
+        tool.ViewObject.Visibility = False
+
+    return cut
+
+
+# ==================================
+# GUI
+# ==================================
+
+def load_params():
+    grp = App.ParamGet(PARAM_PATH)
+    params = {}
+    for key, default in DEFAULTS.items():
+        if PARAM_TYPES[key] is int:
+            params[key] = grp.GetInt(key, default)
+        else:
+            params[key] = grp.GetFloat(key, default)
+    return params
+
+
+def save_params(params):
+    grp = App.ParamGet(PARAM_PATH)
+    for key, value in params.items():
+        if PARAM_TYPES[key] is int:
+            grp.SetInt(key, int(value))
+        else:
+            grp.SetFloat(key, float(value))
+
+
+def ask_params(current):
+    import FreeCADGui as Gui
+    from PySide import QtWidgets
+
+    dialog = QtWidgets.QDialog(Gui.getMainWindow())
+    dialog.setWindowTitle("Voronoi Cutout")
+    form = QtWidgets.QFormLayout(dialog)
+    widgets = {}
+
+    def add(key, label, low, high, step, decimals=None, tip=""):
+        if decimals is None:
+            w = QtWidgets.QSpinBox()
+        else:
+            w = QtWidgets.QDoubleSpinBox()
+            w.setDecimals(decimals)
+            w.setSuffix(" mm")
+        w.setRange(low, high)
+        w.setSingleStep(step)
+        w.setValue(current[key])
+        w.setToolTip(tip)
+        form.addRow(label, w)
+        widgets[key] = w
+
+    add("point_count", "Cell count", 1, 5000, 5,
+        tip="How many seed points (cells) to scatter over the face.")
+    add("seed", "Random seed", 0, 999999, 1,
+        tip="Same seed and settings give the same pattern.")
+    add("min_spacing", "Min point spacing", 0, 1000, 1, 2,
+        tip="Reject seed points closer than this. 0 disables it. Gives more even cells.")
+    add("relax_iterations", "Relax passes", 0, 20, 1,
+        tip="Lloyd relaxation passes. More passes = more regular, honeycomb-like cells.")
+    add("web_thickness", "Web thickness", 0, 100, 0.5, 2,
+        tip="Material left between neighbouring cells.")
+    add("edge_margin", "Edge margin", 0, 100, 0.5, 2,
+        tip="Solid border kept around the edge of the face.")
+    add("corner_radius", "Corner radius", 0, 100, 0.25, 2,
+        tip="Fillet radius on every cell corner. Cells too small to round are dropped.")
+    add("depth", "Cut depth (0 = through)", 0, 10000, 1, 2,
+        tip="How deep to cut from the face. 0 cuts right through the solid.")
+
+    buttons = QtWidgets.QDialogButtonBox(
+        QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+    )
+    buttons.accepted.connect(dialog.accept)
+    buttons.rejected.connect(dialog.reject)
+    form.addRow(buttons)
+
+    exec_fn = getattr(dialog, "exec", None) or dialog.exec_
+    if exec_fn() != QtWidgets.QDialog.Accepted:
+        return None
+    return {key: w.value() for key, w in widgets.items()}
+
+
+def selected_face():
+    """Returns (object, face_name) for the single selected planar face."""
+    import FreeCADGui as Gui
+
+    selection = Gui.Selection.getSelectionEx()
+    faces = [
+        (sel.Object, name)
+        for sel in selection
+        for name in sel.SubElementNames
+        if name.startswith("Face")
+    ]
+    if len(faces) != 1:
+        raise ValueError("Select exactly one face on a solid, then run the macro.")
+    obj, name = faces[0]
+    if not hasattr(obj, "Shape") or obj.Shape.isNull():
+        raise ValueError("The selected object has no shape.")
+    if not obj.Shape.Solids:
+        raise ValueError("The selected object is not a solid.")
+    planar_surface(obj.Shape.getElement(name))
+    return obj, name
+
+
+def report_error(message):
+    App.Console.PrintError("Voronoi Cutout: %s\n" % message)
+    if App.GuiUp:
+        from PySide import QtWidgets
+        QtWidgets.QMessageBox.warning(None, "Voronoi Cutout", message)
+
+
+def main():
+    try:
+        obj, face_name = selected_face()
+    except ValueError as err:
+        report_error(str(err))
+        return
+
+    params = ask_params(load_params())
+    if params is None:
+        return
+    save_params(params)
+
+    doc = obj.Document
+    doc.openTransaction("Voronoi cutout")
+    try:
+        cut = run(obj, face_name, params, doc)
+    except Exception as err:  # surface anything OCC throws
+        doc.abortTransaction()
+        report_error(str(err))
+        return
+    doc.commitTransaction()
+
+    App.Console.PrintMessage(
+        "Voronoi Cutout: cut %d cells into %s\n"
+        % (len(cut.Tool.Shape.Solids), obj.Label)
+    )
+
+
+if App.GuiUp:
+    main()
