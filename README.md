@@ -11,9 +11,23 @@ Personal FreeCAD macros, kept here so they are versioned and safe.
 
 ## Install
 
+On a fresh FreeCAD install, clone this repo and run:
+
+```bash
+./install.sh
+```
+
+It asks FreeCAD where its user folder is, creates the `Macro` and `Mod` folders if needed, links
+everything in, and tidies up links left by older versions of this repo. It never touches files
+that aren't its own links, and it is safe to run again at any time. Restart FreeCAD afterwards.
+`./install.sh --uninstall` removes the links again. If FreeCAD isn't found where expected, point
+the script at the folder with `FREECAD_USER_DIR=/path/to/FreeCAD/v1-1 ./install.sh`.
+
+### What the script does
+
 Two symlinks, so edits here show up in FreeCAD straight away. On macOS with FreeCAD 1.1 the user
 folder is `~/Library/Application Support/FreeCAD/v1-1` (check `Macro > Macros... > User macros
-location` if yours differs). Run these from the repo folder.
+location` if yours differs). To do it by hand, run these from the repo folder.
 
 The macros go in the `Macro` folder:
 
