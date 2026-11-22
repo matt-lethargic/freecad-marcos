@@ -63,71 +63,6 @@ def save_params(params):
             grp.SetFloat(key, float(value))
 
 
-def ask_params(current):
-    from PySide import QtWidgets
-
-    dialog = QtWidgets.QDialog(Gui.getMainWindow())
-    dialog.setWindowTitle("Voronoi Cutout")
-    form = QtWidgets.QFormLayout(dialog)
-    widgets = {}
-
-    def add(key, label, low, high, step, decimals=None, tip=""):
-        if decimals is None:
-            w = QtWidgets.QSpinBox()
-        else:
-            w = QtWidgets.QDoubleSpinBox()
-            w.setDecimals(decimals)
-            w.setSuffix(" mm")
-        w.setRange(low, high)
-        w.setSingleStep(step)
-        w.setValue(current[key])
-        w.setToolTip(tip)
-        form.addRow(label, w)
-        widgets[key] = w
-
-    add("point_count", "Cell count", 1, 5000, 5,
-        tip="How many seed points (cells) to scatter over the face.")
-    add("seed", "Random seed", 0, 999999, 1,
-        tip="Same seed and settings give the same pattern.")
-    add("min_spacing", "Min point spacing", 0, 1000, 1, 2,
-        tip="Reject seed points closer than this. 0 disables it. Gives more even cells.")
-    add("relax_iterations", "Relax passes", 0, 20, 1,
-        tip="Lloyd relaxation passes. More passes = more regular, honeycomb-like cells.")
-    add("web_thickness", "Web thickness", 0, 100, 0.5, 2,
-        tip="Material left between neighbouring cells.")
-    add("edge_margin", "Edge margin", 0, 100, 0.5, 2,
-        tip="Solid border kept around the edge of the face.")
-    add("corner_radius", "Corner radius", 0, 100, 0.25, 2,
-        tip="Fillet radius on every cell corner. Cells too small to round are dropped.")
-
-    mode = QtWidgets.QComboBox()
-    mode.addItems(voronoi_cutout.DEPTH_MODES)
-    if current["depth_mode"] in voronoi_cutout.DEPTH_MODES:
-        mode.setCurrentText(current["depth_mode"])
-    mode.setToolTip("Through next: stop after the first wall. Through all: cut everything "
-                    "behind the face. Depth: cut the fixed depth below.")
-    form.addRow("Cut", mode)
-
-    add("depth", "Depth", 0.01, 10000, 1, 2,
-        tip="Only used when Cut is set to Depth.")
-    widgets["depth"].setEnabled(mode.currentText() == "Depth")
-    mode.currentTextChanged.connect(lambda text: widgets["depth"].setEnabled(text == "Depth"))
-
-    buttons = QtWidgets.QDialogButtonBox(
-        QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
-    )
-    buttons.accepted.connect(dialog.accept)
-    buttons.rejected.connect(dialog.reject)
-    form.addRow(buttons)
-
-    exec_fn = getattr(dialog, "exec", None) or dialog.exec_
-    if exec_fn() != QtWidgets.QDialog.Accepted:
-        return None
-    params = {key: w.value() for key, w in widgets.items()}
-    params["depth_mode"] = mode.currentText()
-    return params
-
-
 def selected_face():
     """Returns (object, face_name) for the single selected planar face."""
     selection = Gui.Selection.getSelectionEx()
@@ -164,7 +99,7 @@ def main():
         report_error(str(err))
         return
 
-    params = ask_params(load_params())
+    params = voronoi_cutout.ask_params(load_params())
     if params is None:
         return
     save_params(params)

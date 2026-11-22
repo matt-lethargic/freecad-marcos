@@ -433,7 +433,11 @@ class VoronoiCutout:
 
 
 class ViewProviderVoronoiCutout:
-    """Part-workbench view: nests the base object under the cutout."""
+    """
+    View side of the feature. Double-click opens the parameter dialog. In the
+    Part workbench the base object is nested under the cutout; in a body the
+    Body handles the tree and we only restore the previous tip on delete.
+    """
 
     def __init__(self, vobj):
         vobj.Proxy = self
@@ -445,10 +449,23 @@ class ViewProviderVoronoiCutout:
         base = getattr(self.Object, "Base", None)
         return [base] if base is not None else []
 
+    def doubleClicked(self, vobj):
+        edit(vobj.Object)
+        return True
+
+    def setEdit(self, vobj, mode=0):
+        if mode != 0:
+            return None
+        edit(vobj.Object)
+        return False  # dialog is modal, nothing stays in edit mode
+
+    def unsetEdit(self, vobj, mode=0):
+        return None
+
     def onDelete(self, vobj, subelements):
-        base = getattr(vobj.Object, "Base", None)
-        if base is not None and hasattr(base, "ViewObject"):
-            base.ViewObject.Visibility = True
+        previous = getattr(vobj.Object, "BaseFeature", None) or getattr(vobj.Object, "Base", None)
+        if previous is not None and hasattr(previous, "ViewObject"):
+            previous.ViewObject.Visibility = True
         return True
 
     def dumps(self):
@@ -456,6 +473,93 @@ class ViewProviderVoronoiCutout:
 
     def loads(self, state):
         return None
+
+
+# ==================================
+# GUI
+# ==================================
+
+def ask_params(current, title="Voronoi Cutout"):
+    """Modal dialog pre-filled with `current`; returns new params or None."""
+    import FreeCADGui as Gui
+    from PySide import QtWidgets
+
+    dialog = QtWidgets.QDialog(Gui.getMainWindow())
+    dialog.setWindowTitle(title)
+    form = QtWidgets.QFormLayout(dialog)
+    widgets = {}
+
+    def add(key, label, low, high, step, decimals=None, tip=""):
+        if decimals is None:
+            w = QtWidgets.QSpinBox()
+        else:
+            w = QtWidgets.QDoubleSpinBox()
+            w.setDecimals(decimals)
+            w.setSuffix(" mm")
+        w.setRange(low, high)
+        w.setSingleStep(step)
+        w.setValue(current[key])
+        w.setToolTip(tip)
+        form.addRow(label, w)
+        widgets[key] = w
+
+    add("point_count", "Cell count", 1, 5000, 5,
+        tip="How many seed points (cells) to scatter over the face.")
+    add("seed", "Random seed", 0, 999999, 1,
+        tip="Same seed and settings give the same pattern.")
+    add("min_spacing", "Min point spacing", 0, 1000, 1, 2,
+        tip="Reject seed points closer than this. 0 disables it. Gives more even cells.")
+    add("relax_iterations", "Relax passes", 0, 20, 1,
+        tip="Lloyd relaxation passes. More passes = more regular, honeycomb-like cells.")
+    add("web_thickness", "Web thickness", 0, 100, 0.5, 2,
+        tip="Material left between neighbouring cells.")
+    add("edge_margin", "Edge margin", 0, 100, 0.5, 2,
+        tip="Solid border kept around the edge of the face.")
+    add("corner_radius", "Corner radius", 0, 100, 0.25, 2,
+        tip="Fillet radius on every cell corner. Cells too small to round are dropped.")
+
+    mode = QtWidgets.QComboBox()
+    mode.addItems(DEPTH_MODES)
+    if current["depth_mode"] in DEPTH_MODES:
+        mode.setCurrentText(current["depth_mode"])
+    mode.setToolTip("Through next: stop after the first wall. Through all: cut everything "
+                    "behind the face. Depth: cut the fixed depth below.")
+    form.addRow("Cut", mode)
+
+    add("depth", "Depth", 0.01, 10000, 1, 2,
+        tip="Only used when Cut is set to Depth.")
+    widgets["depth"].setEnabled(mode.currentText() == "Depth")
+    mode.currentTextChanged.connect(lambda text: widgets["depth"].setEnabled(text == "Depth"))
+
+    buttons = QtWidgets.QDialogButtonBox(
+        QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+    )
+    buttons.accepted.connect(dialog.accept)
+    buttons.rejected.connect(dialog.reject)
+    form.addRow(buttons)
+
+    exec_fn = getattr(dialog, "exec", None) or dialog.exec_
+    if exec_fn() != QtWidgets.QDialog.Accepted:
+        return None
+    params = {key: w.value() for key, w in widgets.items()}
+    params["depth_mode"] = mode.currentText()
+    return params
+
+
+def edit(obj):
+    """Open the dialog for an existing feature, apply and recompute."""
+    current = VoronoiCutout.get_params(obj)
+    for key in ("min_spacing", "web_thickness", "edge_margin", "corner_radius", "depth"):
+        current[key] = float(current[key])
+    params = ask_params(current, "Edit Voronoi cutout")
+    if params is None:
+        return False
+    doc = obj.Document
+    doc.openTransaction("Edit Voronoi cutout")
+    VoronoiCutout.set_params(obj, params)
+    doc.recompute()
+    doc.commitTransaction()
+    return True
 
 
 def find_body(obj):
@@ -485,6 +589,7 @@ def create(obj, face_name, params=None, doc=None):
         feature = doc.addObject("PartDesign::FeatureSubtractivePython", "VoronoiCutout")
         VoronoiCutout(feature, params)
         body.addObject(feature)  # inserts after the tip and sets BaseFeature
+        previous = feature.BaseFeature
     else:
         feature = doc.addObject("Part::FeaturePython", "VoronoiCutout")
         VoronoiCutout(feature, params)
@@ -492,11 +597,16 @@ def create(obj, face_name, params=None, doc=None):
         feature.addProperty("Part::PropertyPartShape", "Cutter", "Voronoi",
                             "The prisms subtracted from Base")
         feature.Base = obj
-        if App.GuiUp:
-            ViewProviderVoronoiCutout(feature.ViewObject)
-            obj.ViewObject.Visibility = False
+        previous = obj
 
     feature.Label = "Voronoi cutout"
     feature.Face = (obj, [face_name])
     doc.recompute()
+
+    if App.GuiUp:
+        # Python-added features start hidden; mimic what the Pocket command does.
+        ViewProviderVoronoiCutout(feature.ViewObject)
+        if previous is not None and hasattr(previous, "ViewObject"):
+            previous.ViewObject.Visibility = False
+        feature.ViewObject.Visibility = True
     return feature

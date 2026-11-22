@@ -36,9 +36,9 @@ can reuse it.
 **Outside a body** (a Part box, an imported STEP, ...) a `Voronoi cutout` Part feature is created
 with the original nested under it. Deleting the cutout shows the original again.
 
-Either way the feature is parametric. Every setting is a property in the `Voronoi` group of the
-property editor, so you can change the seed, web thickness, or depth mode after the fact and
-recompute. The whole run is one undo step, and the dialog remembers your last values.
+Either way the feature is parametric. Double-click `Voronoi cutout` in the tree to reopen the
+dialog with its current values, or change the properties in the `Voronoi` group of the property
+editor and recompute. The whole run is one undo step, and the dialog remembers your last values.
 
 ### Parameters
 
@@ -74,3 +74,13 @@ hollow PartDesign body in both through modes, then reopens a saved result and re
 ```
 
 Set `VORONOI_OUT=/some/dir` to save the resulting `.FCStd` files (also enables the reload check).
+
+## GUI test
+
+This opens a real FreeCAD window for a few seconds, cuts a hollow body, checks that the new feature
+is visible and the old tip hidden, exercises the double-click edit, saves a screenshot to
+`tests/gui_check_body.png`, and writes `tests/gui_check.txt` ending in `OK` or `FAIL`:
+
+```bash
+/Applications/FreeCAD.app/Contents/MacOS/FreeCAD tests/gui_check.py
+```
